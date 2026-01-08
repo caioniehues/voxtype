@@ -544,6 +544,7 @@ We want to hear from you! Voxtype is a young project and your feedback helps mak
 - [materemias](https://github.com/materemias) - Paste output mode, on-demand model loading, PKGBUILD fix
 - [reisset](https://github.com/reisset) - Testing and feedback on post-processing feature
 - [Goodroot](https://github.com/goodroot) - Testing, feedback, and documentation updates
+- [robzolkos](https://github.com/robzolkos) - Auto-submit feature for AI agent workflows
 
 ## License
 
