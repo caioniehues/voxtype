@@ -369,9 +369,15 @@ impl Daemon {
                     // Output the text
                     *state = State::Outputting { text: final_text.clone() };
 
+                    let output_options = output::OutputOptions {
+                        pre_output_command: output_config.pre_output_command.as_deref(),
+                        post_output_command: output_config.post_output_command.as_deref(),
+                    };
+
                     if let Err(e) = output::output_with_fallback(
                         &output_chain,
-                        &final_text
+                        &final_text,
+                        output_options,
                     ).await {
                         tracing::error!("Output failed: {}", e);
                     }
