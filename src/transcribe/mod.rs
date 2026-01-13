@@ -18,6 +18,18 @@ pub trait Transcriber: Send + Sync {
     /// Transcribe audio samples to text
     /// Input: f32 samples, mono, 16kHz
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError>;
+
+    /// Prepare for transcription (optional, called when recording starts)
+    ///
+    /// For subprocess-based transcribers, this spawns the worker process
+    /// and begins loading the model while the user is still speaking.
+    /// This hides model loading latency behind recording time.
+    ///
+    /// Default implementation does nothing (for transcribers that don't
+    /// benefit from preparation, like those with preloaded models).
+    fn prepare(&self) {
+        // Default: no-op
+    }
 }
 
 /// Factory function to create transcriber based on configured backend

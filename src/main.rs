@@ -17,6 +17,9 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
 
+    // Check if this is the worker command (needs stderr-only logging)
+    let is_worker = matches!(cli.command, Some(Commands::TranscribeWorker { .. }));
+
     // Initialize logging
     let log_level = if cli.quiet {
         "error"
@@ -28,13 +31,25 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
-        )
-        .with_target(false)
-        .init();
+    if is_worker {
+        // Worker uses stderr for logging (stdout is reserved for IPC protocol)
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
+            )
+            .with_target(false)
+            .with_writer(std::io::stderr)
+            .init();
+    } else {
+        tracing_subscriber::fmt()
+            .with_env_filter(
+                EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| EnvFilter::new(format!("voxtype={},warn", log_level))),
+            )
+            .with_target(false)
+            .init();
+    }
 
     // Load configuration
     let mut config = config::load_config(cli.config.as_deref())?;

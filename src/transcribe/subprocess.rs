@@ -10,15 +10,19 @@
 //! - No GPU power draw between transcriptions (important for laptops)
 //! - Clean separation of concerns
 //!
-//! Trade-offs:
-//! - Model loading happens once per transcription
-//! - Slightly higher latency (but model loads while user speaks)
+//! Eager spawning:
+//! - `prepare()` spawns the worker when recording STARTS
+//! - Worker loads model while user is speaking
+//! - `transcribe()` sends audio to already-ready worker
+//! - Perceived latency is just transcription time, not model load + transcription
 
+use super::worker::READY_SIGNAL;
 use super::Transcriber;
 use crate::config::WhisperConfig;
 use crate::error::TranscribeError;
-use std::io::{Read, Write};
-use std::process::{Child, Command, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
 use ureq::serde_json;
 
 /// Response from the transcription worker process
@@ -31,16 +35,28 @@ struct WorkerResponse {
     error: Option<String>,
 }
 
+/// A prepared worker process ready to receive audio
+struct PreparedWorker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
 /// Subprocess-based transcriber for GPU isolation
 ///
 /// Spawns a fresh `voxtype transcribe-worker` process for each transcription.
 /// The worker loads the model, transcribes, returns the result, and exits.
 /// This ensures all GPU resources are released after transcription.
+///
+/// With eager spawning (`prepare()` called when recording starts), the worker
+/// loads the model while the user is speaking, hiding load latency.
 pub struct SubprocessTranscriber {
     /// Config to pass to the worker
     config: WhisperConfig,
     /// Path to the config file (if any)
     config_path: Option<std::path::PathBuf>,
+    /// Pre-spawned worker (from prepare())
+    prepared_worker: Mutex<Option<PreparedWorker>>,
 }
 
 impl SubprocessTranscriber {
@@ -52,17 +68,19 @@ impl SubprocessTranscriber {
         Ok(Self {
             config: config.clone(),
             config_path,
+            prepared_worker: Mutex::new(None),
         })
     }
 
     /// Get the path to the voxtype executable
     fn get_executable_path() -> Result<std::path::PathBuf, TranscribeError> {
-        std::env::current_exe()
-            .map_err(|e| TranscribeError::InitFailed(format!("Cannot find voxtype executable: {}", e)))
+        std::env::current_exe().map_err(|e| {
+            TranscribeError::InitFailed(format!("Cannot find voxtype executable: {}", e))
+        })
     }
 
-    /// Spawn a worker process
-    fn spawn_worker(&self) -> Result<Child, TranscribeError> {
+    /// Build the command to spawn a worker
+    fn build_worker_command(&self) -> Result<Command, TranscribeError> {
         let exe_path = Self::get_executable_path()?;
 
         let mut cmd = Command::new(&exe_path);
@@ -86,21 +104,66 @@ impl SubprocessTranscriber {
             cmd.arg("--threads").arg(threads.to_string());
         }
 
-        cmd.spawn().map_err(|e| {
+        Ok(cmd)
+    }
+
+    /// Spawn a worker process and wait for it to be ready
+    fn spawn_and_wait_ready(&self) -> Result<PreparedWorker, TranscribeError> {
+        let mut cmd = self.build_worker_command()?;
+
+        let mut child = cmd.spawn().map_err(|e| {
             TranscribeError::InitFailed(format!("Failed to spawn transcribe-worker: {}", e))
+        })?;
+
+        // Get handles
+        let stdin = child.stdin.take().ok_or_else(|| {
+            TranscribeError::InitFailed("Worker stdin not available".to_string())
+        })?;
+
+        let stdout = child.stdout.take().ok_or_else(|| {
+            TranscribeError::InitFailed("Worker stdout not available".to_string())
+        })?;
+
+        let mut stdout = BufReader::new(stdout);
+
+        // Wait for READY signal (model loaded)
+        let mut ready_line = String::new();
+        stdout.read_line(&mut ready_line).map_err(|e| {
+            TranscribeError::InitFailed(format!("Failed to read READY signal: {}", e))
+        })?;
+
+        if ready_line.trim() != READY_SIGNAL {
+            // Worker failed during model load - try to get error from JSON
+            if let Ok(response) = serde_json::from_str::<WorkerResponse>(&ready_line) {
+                if let Some(error) = response.error {
+                    return Err(TranscribeError::InitFailed(error));
+                }
+            }
+            return Err(TranscribeError::InitFailed(format!(
+                "Worker failed to load model (got: {:?})",
+                ready_line.trim()
+            )));
+        }
+
+        tracing::debug!("Worker ready (model loaded)");
+
+        Ok(PreparedWorker {
+            child,
+            stdin,
+            stdout,
         })
     }
 
     /// Write audio samples to the worker's stdin
     fn write_audio_to_worker(
-        stdin: &mut std::process::ChildStdin,
+        stdin: &mut ChildStdin,
         samples: &[f32],
     ) -> Result<(), TranscribeError> {
         // Write sample count (u32 little-endian)
         let count = samples.len() as u32;
-        stdin
-            .write_all(&count.to_le_bytes())
-            .map_err(|e| TranscribeError::InferenceFailed(format!("Failed to write sample count: {}", e)))?;
+        stdin.write_all(&count.to_le_bytes()).map_err(|e| {
+            TranscribeError::InferenceFailed(format!("Failed to write sample count: {}", e))
+        })?;
 
         // Write samples (f32 little-endian)
         let samples_bytes = unsafe {
@@ -120,68 +183,90 @@ impl SubprocessTranscriber {
         Ok(())
     }
 
-    /// Read the response from the worker's stdout
+    /// Read the JSON response from the worker's stdout
     fn read_worker_response(
-        stdout: &mut std::process::ChildStdout,
+        stdout: &mut BufReader<ChildStdout>,
     ) -> Result<WorkerResponse, TranscribeError> {
-        let mut output = String::new();
-        stdout.read_to_string(&mut output).map_err(|e| {
+        let mut line = String::new();
+        stdout.read_line(&mut line).map_err(|e| {
             TranscribeError::InferenceFailed(format!("Failed to read worker output: {}", e))
         })?;
 
-        // Parse the last line as JSON (worker may have written multiple lines)
-        let last_line = output.lines().last().unwrap_or("");
-
-        serde_json::from_str(last_line).map_err(|e| {
+        serde_json::from_str(&line).map_err(|e| {
             TranscribeError::InferenceFailed(format!(
                 "Failed to parse worker response: {} (output: {:?})",
-                e, output
+                e, line
             ))
         })
     }
 }
 
 impl Transcriber for SubprocessTranscriber {
+    fn prepare(&self) {
+        tracing::debug!("Preparing subprocess transcriber (spawning worker)...");
+        let start = std::time::Instant::now();
+
+        match self.spawn_and_wait_ready() {
+            Ok(worker) => {
+                let mut guard = self.prepared_worker.lock().unwrap();
+                *guard = Some(worker);
+                tracing::info!(
+                    "Worker prepared in {:.2}s (model loaded while recording)",
+                    start.elapsed().as_secs_f32()
+                );
+            }
+            Err(e) => {
+                tracing::warn!("Failed to prepare worker: {} (will retry on transcribe)", e);
+            }
+        }
+    }
+
     fn transcribe(&self, samples: &[f32]) -> Result<String, TranscribeError> {
         if samples.is_empty() {
-            return Err(TranscribeError::AudioFormat("Empty audio buffer".to_string()));
+            return Err(TranscribeError::AudioFormat(
+                "Empty audio buffer".to_string(),
+            ));
         }
 
         let duration_secs = samples.len() as f32 / 16000.0;
-        tracing::debug!(
-            "Spawning subprocess for {:.2}s of audio ({} samples)",
-            duration_secs,
-            samples.len()
-        );
 
-        // Spawn worker process
+        // Try to use prepared worker, or spawn a new one
+        let mut prepared = self.prepared_worker.lock().unwrap();
+        let mut worker = match prepared.take() {
+            Some(w) => {
+                tracing::debug!(
+                    "Using pre-spawned worker for {:.2}s of audio",
+                    duration_secs
+                );
+                w
+            }
+            None => {
+                tracing::debug!(
+                    "No prepared worker, spawning new one for {:.2}s of audio",
+                    duration_secs
+                );
+                self.spawn_and_wait_ready()?
+            }
+        };
+        drop(prepared); // Release lock
+
         let start = std::time::Instant::now();
-        let mut child = self.spawn_worker()?;
-
-        // Get handles to stdin/stdout
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            TranscribeError::InitFailed("Worker stdin not available".to_string())
-        })?;
-
-        let mut stdout = child.stdout.take().ok_or_else(|| {
-            TranscribeError::InitFailed("Worker stdout not available".to_string())
-        })?;
 
         // Write audio to worker
-        Self::write_audio_to_worker(&mut stdin, samples)?;
-        drop(stdin); // Close stdin to signal EOF
+        Self::write_audio_to_worker(&mut worker.stdin, samples)?;
+        drop(worker.stdin); // Close stdin to signal EOF
 
         // Read response
-        let response = Self::read_worker_response(&mut stdout)?;
+        let response = Self::read_worker_response(&mut worker.stdout)?;
 
         // Wait for process to exit
-        let status = child.wait().map_err(|e| {
+        let status = worker.child.wait().map_err(|e| {
             TranscribeError::InferenceFailed(format!("Failed to wait for worker: {}", e))
         })?;
 
         if !status.success() {
             // Try to get stderr for error details
-            if let Some(mut stderr) = child.stderr.take() {
+            if let Some(mut stderr) = worker.child.stderr.take() {
                 let mut err_output = String::new();
                 let _ = stderr.read_to_string(&mut err_output);
                 if !err_output.is_empty() {
