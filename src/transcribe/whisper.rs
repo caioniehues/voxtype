@@ -18,6 +18,8 @@ pub struct WhisperTranscriber {
     translate: bool,
     /// Number of threads to use
     threads: usize,
+    /// Whether to optimize context window for short clips
+    context_window_optimization: bool,
 }
 
 impl WhisperTranscriber {
@@ -47,6 +49,7 @@ impl WhisperTranscriber {
             language: config.language.clone(),
             translate: config.translate,
             threads,
+            context_window_optimization: config.context_window_optimization,
         })
     }
 }
@@ -102,14 +105,16 @@ impl Transcriber for WhisperTranscriber {
         }
 
         // Optimize context window for short clips
-        if let Some(audio_ctx) = calculate_audio_ctx(duration_secs) {
-            params.set_audio_ctx(audio_ctx);
-            tracing::info!(
-                "Audio context optimization: using audio_ctx={} for {:.2}s clip (formula: {:.2}s * 50 + 64)",
-                audio_ctx,
-                duration_secs,
-                duration_secs
-            );
+        if self.context_window_optimization {
+            if let Some(audio_ctx) = calculate_audio_ctx(duration_secs) {
+                params.set_audio_ctx(audio_ctx);
+                tracing::info!(
+                    "Audio context optimization: using audio_ctx={} for {:.2}s clip (formula: {:.2}s * 50 + 64)",
+                    audio_ctx,
+                    duration_secs,
+                    duration_secs
+                );
+            }
         }
 
         // Run inference

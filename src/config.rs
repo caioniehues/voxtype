@@ -300,6 +300,10 @@ fn default_on_demand_loading() -> bool {
     false
 }
 
+fn default_context_window_optimization() -> bool {
+    true
+}
+
 impl Default for AudioFeedbackConfig {
     fn default() -> Self {
         Self {
@@ -535,6 +539,13 @@ pub struct WhisperConfig {
     #[serde(default)]
     pub gpu_isolation: bool,
 
+    /// Optimize context window for short recordings (default: true)
+    /// When enabled, uses a smaller context window proportional to audio length
+    /// for clips under 22.5 seconds. This significantly speeds up transcription
+    /// on both CPU and GPU. If transcription seems unstable, set this to false.
+    #[serde(default = "default_context_window_optimization")]
+    pub context_window_optimization: bool,
+
     // --- Remote backend settings ---
 
     /// Remote server endpoint URL (e.g., "http://192.168.1.100:8080")
@@ -708,6 +719,7 @@ impl Default for Config {
                 threads: None,
                 on_demand_loading: default_on_demand_loading(),
                 gpu_isolation: false,
+                context_window_optimization: default_context_window_optimization(),
                 remote_endpoint: None,
                 remote_model: None,
                 remote_api_key: None,
