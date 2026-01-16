@@ -555,6 +555,20 @@ When only `pkgrel` is bumped, the URL stays the same. AUR helpers like yay cache
 
 This caused the v0.4.5 incident where users had cached PKGBUILDs with old checksums that didn't match re-uploaded binaries.
 
+### Post-Install Message
+
+When updating the AUR packages, also update the post-upgrade message in `packaging/arch-bin/voxtype-bin.install` to reflect the current release highlights.
+
+The `post_upgrade()` function displays a message to users after they upgrade. This should summarize what's new in the version they just installed, not old releases.
+
+```bash
+# Check current message
+cat packaging/arch-bin/voxtype-bin.install
+
+# Update the post_upgrade() message with current version highlights
+# Then commit with the PKGBUILD changes
+```
+
 ## Release Notes and Website News
 
 **Every GitHub release must have a corresponding news article on the website.**
