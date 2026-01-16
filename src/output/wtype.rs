@@ -69,16 +69,23 @@ impl TextOutput for WtypeOutput {
         }
 
         let mut cmd = Command::new("wtype");
+        let mut debug_args = vec!["wtype".to_string()];
 
         // Add pre-typing delay if configured (helps prevent first character drop)
         if self.pre_type_delay_ms > 0 {
             cmd.arg("-s").arg(self.pre_type_delay_ms.to_string());
+            debug_args.push(format!("-s {}", self.pre_type_delay_ms));
         }
 
         // Add inter-keystroke delay if configured
         if self.type_delay_ms > 0 {
             cmd.arg("-d").arg(self.type_delay_ms.to_string());
+            debug_args.push(format!("-d {}", self.type_delay_ms));
         }
+
+        debug_args.push("--".to_string());
+        debug_args.push(format!("\"{}\"", text.chars().take(20).collect::<String>()));
+        tracing::debug!("Running: {}", debug_args.join(" "));
 
         let output = cmd
             .arg("--")

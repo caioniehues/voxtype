@@ -97,6 +97,7 @@ impl TextOutput for YdotoolOutput {
 
         // Pre-typing delay if configured
         if self.pre_type_delay_ms > 0 {
+            tracing::debug!("ydotool: sleeping {}ms before typing", self.pre_type_delay_ms);
             tokio::time::sleep(Duration::from_millis(self.pre_type_delay_ms as u64)).await;
         }
 
@@ -113,6 +114,13 @@ impl TextOutput for YdotoolOutput {
 
         // The -- ensures text starting with - isn't treated as an option
         cmd.arg("--").arg(text);
+
+        tracing::debug!(
+            "Running: ydotool type --key-delay {} {} -- \"{}\"",
+            self.type_delay_ms,
+            if self.supports_key_hold { format!("--key-hold {}", self.type_delay_ms) } else { String::new() },
+            text.chars().take(20).collect::<String>()
+        );
 
         let output = cmd
             .stdout(Stdio::null())
