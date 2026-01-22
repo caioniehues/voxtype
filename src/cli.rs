@@ -23,9 +23,10 @@ COMMANDS:
   voxtype config           Show current configuration
 
 EXAMPLES:
-  voxtype setup model      Interactive model selection
+  voxtype setup model      Interactive model selection (Whisper or Parakeet)
   voxtype setup waybar     Show Waybar integration config
-  voxtype setup gpu        Manage GPU acceleration
+  voxtype setup gpu        Manage GPU acceleration (Vulkan)
+  voxtype setup parakeet   Switch between Whisper and Parakeet engines
   voxtype status --follow --format json   Waybar integration
 
 See 'voxtype <command> --help' for more info on a command.
@@ -52,13 +53,24 @@ pub struct Cli {
     #[arg(long)]
     pub paste: bool,
 
-    /// Override whisper model (tiny, tiny.en, base, base.en, small, small.en, medium, medium.en, large-v3, large-v3-turbo)
+    /// Override model for transcription.
+    /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
+    /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
     /// Disable context window optimization for short recordings
     #[arg(long)]
     pub no_whisper_context_optimization: bool,
+
+    /// Initial prompt to provide context for transcription.
+    /// Hints at terminology, proper nouns, or formatting conventions.
+    #[arg(long, value_name = "PROMPT")]
+    pub initial_prompt: Option<String>,
+
+    /// Override transcription engine: "whisper" (default) or "parakeet" (EXPERIMENTAL)
+    #[arg(long, value_name = "ENGINE")]
+    pub engine: Option<String>,
 
     /// Override hotkey (e.g., SCROLLLOCK, PAUSE, F13)
     #[arg(long, value_name = "KEY")]
@@ -75,6 +87,12 @@ pub struct Cli {
     /// DEPRECATED: Use --pre-type-delay instead
     #[arg(long, value_name = "MS", hide = true)]
     pub wtype_delay: Option<u32>,
+
+    /// Output driver order for type mode (comma-separated)
+    /// Overrides config driver_order. Available: wtype, dotool, ydotool, clipboard
+    /// Example: --driver=ydotool,wtype,clipboard
+    #[arg(long, value_name = "DRIVERS")]
+    pub driver: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -121,7 +139,9 @@ pub enum Commands {
         #[arg(long)]
         download: bool,
 
-        /// Specify which model to download (use with --download)
+        /// Specify which model to download (use with --download).
+        /// Whisper: tiny, base, small, medium, large-v3, large-v3-turbo (and .en variants).
+        /// Parakeet: parakeet-tdt-0.6b-v3, parakeet-tdt-0.6b-v3-int8
         #[arg(long, value_name = "NAME")]
         model: Option<String>,
 
@@ -192,6 +212,15 @@ pub enum RecordAction {
         /// Use --file alone to use file_path from config, or --file=path.txt for explicit path
         #[arg(long, value_name = "FILE", group = "output_mode", num_args = 0..=1, default_missing_value = "")]
         file: Option<String>,
+
+        /// Use a specific model for this transcription (e.g., large-v3-turbo)
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+
+        /// Use a named profile for post-processing (e.g., --profile slack)
+        /// Profiles are defined in config.toml under [profiles.name]
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Stop recording and transcribe (send SIGUSR2 to daemon)
     Stop {
@@ -220,6 +249,20 @@ pub enum RecordAction {
         /// Override output mode to paste (clipboard + Ctrl+V)
         #[arg(long, group = "output_mode")]
         paste: bool,
+
+        /// Write transcription to a file
+        /// Use --file alone to use file_path from config, or --file=path.txt for explicit path
+        #[arg(long, value_name = "FILE", group = "output_mode", num_args = 0..=1, default_missing_value = "")]
+        file: Option<String>,
+
+        /// Use a specific model for this transcription (e.g., large-v3-turbo)
+        #[arg(long, value_name = "MODEL")]
+        model: Option<String>,
+
+        /// Use a named profile for post-processing (e.g., --profile slack)
+        /// Profiles are defined in config.toml under [profiles.name]
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
     },
     /// Cancel current recording or transcription (discard without output)
     Cancel,
@@ -235,6 +278,7 @@ impl RecordAction {
                 clipboard,
                 paste,
                 file,
+                ..
             } => (*type_mode, *clipboard, *paste, file.as_ref()),
             RecordAction::Stop {
                 type_mode,
@@ -245,7 +289,9 @@ impl RecordAction {
                 type_mode,
                 clipboard,
                 paste,
-            } => (*type_mode, *clipboard, *paste, None),
+                file,
+                ..
+            } => (*type_mode, *clipboard, *paste, file.as_ref()),
             RecordAction::Cancel => return None,
         };
 
@@ -268,8 +314,28 @@ impl RecordAction {
     /// Returns None if --file was not used
     pub fn file_path(&self) -> Option<&str> {
         match self {
-            RecordAction::Start { file, .. } => file.as_deref(),
-            RecordAction::Stop { .. } | RecordAction::Toggle { .. } | RecordAction::Cancel => None,
+            RecordAction::Start { file, .. } | RecordAction::Toggle { file, .. } => file.as_deref(),
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+        }
+    }
+
+    /// Extract the model override from the action flags
+    /// Note: --model is only available on start/toggle, not stop (model is selected at recording start)
+    pub fn model_override(&self) -> Option<&str> {
+        match self {
+            RecordAction::Start { model, .. } => model.as_deref(),
+            RecordAction::Toggle { model, .. } => model.as_deref(),
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
+        }
+    }
+
+    /// Get the profile name from --profile flag
+    /// Returns the profile name if specified on start or toggle commands
+    pub fn profile(&self) -> Option<&str> {
+        match self {
+            RecordAction::Start { profile, .. } => profile.as_deref(),
+            RecordAction::Toggle { profile, .. } => profile.as_deref(),
+            RecordAction::Stop { .. } | RecordAction::Cancel => None,
         }
     }
 }
@@ -309,6 +375,21 @@ pub enum SetupAction {
         uninstall: bool,
     },
 
+    /// DankMaterialShell (DMS) integration
+    Dms {
+        /// Install DMS plugin (create widget directory and QML file)
+        #[arg(long)]
+        install: bool,
+
+        /// Uninstall DMS plugin (remove widget directory)
+        #[arg(long)]
+        uninstall: bool,
+
+        /// Output only the QML content (for scripting)
+        #[arg(long)]
+        qml: bool,
+    },
+
     /// Interactive model selection and download
     Model {
         /// List installed models instead of interactive selection
@@ -335,6 +416,21 @@ pub enum SetupAction {
         disable: bool,
 
         /// Show current backend status
+        #[arg(long)]
+        status: bool,
+    },
+
+    /// Switch between Whisper and Parakeet transcription engines
+    Parakeet {
+        /// Enable Parakeet engine (switch to Parakeet binary)
+        #[arg(long)]
+        enable: bool,
+
+        /// Disable Parakeet engine (switch back to Whisper binary)
+        #[arg(long)]
+        disable: bool,
+
+        /// Show current Parakeet backend status
         #[arg(long)]
         status: bool,
     },
@@ -709,12 +805,36 @@ mod tests {
     }
 
     #[test]
+    fn test_record_start_model_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--model", "large-v3-turbo"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("large-v3-turbo"));
+                assert_eq!(action.output_mode_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
     fn test_record_start_file_without_path() {
         let cli = Cli::parse_from(["voxtype", "record", "start", "--file"]);
         match cli.command {
             Some(Commands::Record { action }) => {
                 assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
                 assert_eq!(action.file_path(), Some("")); // Empty string means use config path
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_model_and_output_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--model", "large-v3-turbo", "--clipboard"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("large-v3-turbo"));
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
             }
             _ => panic!("Expected Record command"),
         }
@@ -730,6 +850,56 @@ mod tests {
             }
             _ => panic!("Expected Record command"),
         }
+    }
+
+    #[test]
+    fn test_record_toggle_model_override() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--model", "medium.en"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), Some("medium.en"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_file_with_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file=out.txt"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(action.file_path(), Some("out.txt"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_file_without_path() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--file"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::File));
+                assert_eq!(action.file_path(), Some("")); // Empty string means use config path
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_toggle_file_mutually_exclusive_with_clipboard() {
+        let result = Cli::try_parse_from([
+            "voxtype",
+            "record",
+            "toggle",
+            "--file=out.txt",
+            "--clipboard",
+        ]);
+        assert!(
+            result.is_err(),
+            "Should not allow both --file and --clipboard on toggle"
+        );
     }
 
     #[test]
@@ -775,5 +945,222 @@ mod tests {
             result.is_err(),
             "Should not allow both --file and --type"
         );
+    }
+
+    #[test]
+    fn test_record_cancel_no_model() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.model_override(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_with_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--profile", "slack"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("slack"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    // =========================================================================
+    // Engine flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_engine_flag_whisper() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "whisper"]);
+        assert_eq!(cli.engine, Some("whisper".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_parakeet() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "parakeet"]);
+        assert_eq!(cli.engine, Some("parakeet".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(cli.engine.is_none());
+    }
+
+    #[test]
+    fn test_engine_flag_with_daemon_command() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "parakeet", "daemon"]);
+        assert_eq!(cli.engine, Some("parakeet".to_string()));
+        assert!(matches!(cli.command, Some(Commands::Daemon)));
+    }
+
+    #[test]
+    fn test_engine_flag_with_model_flag() {
+        let cli = Cli::parse_from(["voxtype", "--engine", "whisper", "--model", "large-v3"]);
+        assert_eq!(cli.engine, Some("whisper".to_string()));
+        assert_eq!(cli.model, Some("large-v3".to_string()));
+    }
+
+    #[test]
+    fn test_engine_flag_case_preserved() {
+        // The CLI should preserve case as-is; main.rs handles case-insensitive matching
+        let cli = Cli::parse_from(["voxtype", "--engine", "PARAKEET"]);
+        assert_eq!(cli.engine, Some("PARAKEET".to_string()));
+    }
+
+    // =========================================================================
+    // Profile flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_record_toggle_with_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "toggle", "--profile", "code"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("code"));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_without_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "start"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_stop_has_no_profile() {
+        // Stop command doesn't have --profile flag
+        let cli = Cli::parse_from(["voxtype", "record", "stop"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_cancel_has_no_profile() {
+        let cli = Cli::parse_from(["voxtype", "record", "cancel"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), None);
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    #[test]
+    fn test_record_start_profile_with_output_mode() {
+        // Profile can be used together with output mode overrides
+        let cli = Cli::parse_from(["voxtype", "record", "start", "--profile", "slack", "--clipboard"]);
+        match cli.command {
+            Some(Commands::Record { action }) => {
+                assert_eq!(action.profile(), Some("slack"));
+                assert_eq!(action.output_mode_override(), Some(OutputModeOverride::Clipboard));
+            }
+            _ => panic!("Expected Record command"),
+        }
+    }
+
+    // =========================================================================
+    // DMS setup tests
+    // =========================================================================
+
+    #[test]
+    fn test_setup_dms_install() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms", "--install"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                ..
+            }) => {
+                assert!(install, "should have install=true");
+                assert!(!uninstall, "should have uninstall=false");
+                assert!(!qml, "should have qml=false");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_dms_uninstall() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms", "--uninstall"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                ..
+            }) => {
+                assert!(!install, "should have install=false");
+                assert!(uninstall, "should have uninstall=true");
+                assert!(!qml, "should have qml=false");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_dms_qml() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms", "--qml"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                ..
+            }) => {
+                assert!(!install, "should have install=false");
+                assert!(!uninstall, "should have uninstall=false");
+                assert!(qml, "should have qml=true");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    #[test]
+    fn test_setup_dms_default() {
+        let cli = Cli::parse_from(["voxtype", "setup", "dms"]);
+        match cli.command {
+            Some(Commands::Setup {
+                action: Some(SetupAction::Dms { install, uninstall, qml }),
+                ..
+            }) => {
+                assert!(!install, "should have install=false");
+                assert!(!uninstall, "should have uninstall=false");
+                assert!(!qml, "should have qml=false");
+            }
+            _ => panic!("Expected Setup Dms command"),
+        }
+    }
+
+    // =========================================================================
+    // Driver flag tests
+    // =========================================================================
+
+    #[test]
+    fn test_driver_flag() {
+        let cli = Cli::parse_from(["voxtype", "--driver=ydotool,wtype"]);
+        assert_eq!(cli.driver, Some("ydotool,wtype".to_string()));
+    }
+
+    #[test]
+    fn test_driver_flag_single() {
+        let cli = Cli::parse_from(["voxtype", "--driver=ydotool"]);
+        assert_eq!(cli.driver, Some("ydotool".to_string()));
+    }
+
+    #[test]
+    fn test_driver_flag_not_set() {
+        let cli = Cli::parse_from(["voxtype"]);
+        assert!(cli.driver.is_none());
     }
 }

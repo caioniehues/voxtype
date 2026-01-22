@@ -16,59 +16,34 @@ use tokio::process::Command;
 
 /// wtype-based text output
 pub struct WtypeOutput {
-    /// Whether to show a desktop notification
-    notify: bool,
     /// Whether to send Enter key after output
     auto_submit: bool,
     /// Delay between keystrokes in milliseconds
     type_delay_ms: u32,
     /// Delay before typing starts (ms), allows virtual keyboard to initialize
     pre_type_delay_ms: u32,
+    /// Convert newlines to Shift+Enter (for apps where Enter submits)
+    shift_enter_newlines: bool,
 }
 
 impl WtypeOutput {
     /// Create a new wtype output
     pub fn new(
-        notify: bool,
         auto_submit: bool,
         type_delay_ms: u32,
         pre_type_delay_ms: u32,
+        shift_enter_newlines: bool,
     ) -> Self {
         Self {
-            notify,
             auto_submit,
             type_delay_ms,
             pre_type_delay_ms,
+            shift_enter_newlines,
         }
     }
 
-    /// Send a desktop notification
-    async fn send_notification(&self, text: &str) {
-        // Truncate preview for notification
-        let preview: String = text.chars().take(100).collect();
-        let preview = if text.chars().count() > 100 {
-            format!("{}...", preview)
-        } else {
-            preview
-        };
-
-        let _ = Command::new("notify-send")
-            .args([
-                "--app-name=Voxtype",
-                "--expire-time=3000",
-                "Transcribed",
-                &preview,
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await;
-    }
-}
-
-#[async_trait::async_trait]
-impl TextOutput for WtypeOutput {
-    async fn output(&self, text: &str) -> Result<(), OutputError> {
+    /// Type a string of text using wtype
+    async fn type_text(&self, text: &str) -> Result<(), OutputError> {
         if text.is_empty() {
             return Ok(());
         }
@@ -115,25 +90,84 @@ impl TextOutput for WtypeOutput {
             )));
         }
 
-        // Send Enter key if configured
-        if self.auto_submit {
-            let enter_output = Command::new("wtype")
-                .args(["-k", "Return"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::piped())
-                .output()
-                .await
-                .map_err(|e| OutputError::InjectionFailed(format!("wtype Enter failed: {}", e)))?;
+        Ok(())
+    }
 
-            if !enter_output.status.success() {
-                let stderr = String::from_utf8_lossy(&enter_output.stderr);
-                tracing::warn!("Failed to send Enter key: {}", stderr);
+    /// Send Shift+Enter key combination using wtype
+    async fn send_shift_enter(&self) -> Result<(), OutputError> {
+        let output = Command::new("wtype")
+            .args(["-M", "shift", "-k", "Return", "-m", "shift"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| {
+                OutputError::InjectionFailed(format!("wtype Shift+Enter failed: {}", e))
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("Failed to send Shift+Enter: {}", stderr);
+        }
+
+        Ok(())
+    }
+
+    /// Send Enter key using wtype
+    async fn send_enter(&self) -> Result<(), OutputError> {
+        let output = Command::new("wtype")
+            .args(["-k", "Return"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+            .map_err(|e| OutputError::InjectionFailed(format!("wtype Enter failed: {}", e)))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!("Failed to send Enter key: {}", stderr);
+        }
+
+        Ok(())
+    }
+
+    /// Output text with newlines converted to Shift+Enter
+    async fn output_with_shift_enter_newlines(&self, text: &str) -> Result<(), OutputError> {
+        let segments: Vec<&str> = text.split('\n').collect();
+
+        for (i, segment) in segments.iter().enumerate() {
+            // Type the text segment
+            if !segment.is_empty() {
+                self.type_text(segment).await?;
+            }
+
+            // Send Shift+Enter between segments (not after the last one)
+            if i < segments.len() - 1 {
+                self.send_shift_enter().await?;
             }
         }
 
-        // Send notification if enabled
-        if self.notify {
-            self.send_notification(text).await;
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl TextOutput for WtypeOutput {
+    async fn output(&self, text: &str) -> Result<(), OutputError> {
+        if text.is_empty() {
+            return Ok(());
+        }
+
+        // If shift_enter_newlines is enabled, process text with Shift+Enter for newlines
+        if self.shift_enter_newlines && text.contains('\n') {
+            self.output_with_shift_enter_newlines(text).await?;
+        } else {
+            self.type_text(text).await?;
+        }
+
+        // Send Enter key if auto_submit is configured
+        if self.auto_submit {
+            self.send_enter().await?;
         }
 
         Ok(())
@@ -164,24 +198,22 @@ mod tests {
 
     #[test]
     fn test_new() {
-        let output = WtypeOutput::new(true, false, 0, 0);
-        assert!(output.notify);
+        let output = WtypeOutput::new(false, 0, 0, false);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 0);
+        assert!(!output.shift_enter_newlines);
     }
 
     #[test]
     fn test_new_with_enter() {
-        let output = WtypeOutput::new(false, true, 0, 0);
-        assert!(!output.notify);
+        let output = WtypeOutput::new(true, 0, 0, false);
         assert!(output.auto_submit);
     }
 
     #[test]
     fn test_new_with_type_delay() {
-        let output = WtypeOutput::new(false, false, 50, 0);
-        assert!(!output.notify);
+        let output = WtypeOutput::new(false, 50, 0, false);
         assert!(!output.auto_submit);
         assert_eq!(output.type_delay_ms, 50);
         assert_eq!(output.pre_type_delay_ms, 0);
@@ -189,8 +221,14 @@ mod tests {
 
     #[test]
     fn test_new_with_pre_type_delay() {
-        let output = WtypeOutput::new(false, false, 0, 200);
+        let output = WtypeOutput::new(false, 0, 200, false);
         assert_eq!(output.type_delay_ms, 0);
         assert_eq!(output.pre_type_delay_ms, 200);
+    }
+
+    #[test]
+    fn test_new_with_shift_enter_newlines() {
+        let output = WtypeOutput::new(false, 0, 0, true);
+        assert!(output.shift_enter_newlines);
     }
 }

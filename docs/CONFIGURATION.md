@@ -15,6 +15,35 @@ Voxtype looks for configuration in the following locations (in order):
 
 ---
 
+## engine
+
+**Type:** String
+**Default:** `"whisper"`
+**Required:** No
+
+Selects which speech-to-text engine to use for transcription.
+
+**Values:**
+- `whisper` - OpenAI Whisper via whisper.cpp (default, recommended)
+- `parakeet` - NVIDIA Parakeet via ONNX Runtime (experimental, requires special binary)
+
+**Example:**
+```toml
+engine = "whisper"
+```
+
+**CLI override:**
+```bash
+voxtype --engine parakeet daemon
+```
+
+**Notes:**
+- Parakeet requires a Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+- When using Parakeet, you must also configure the `[parakeet]` section
+- See [PARAKEET.md](PARAKEET.md) for detailed Parakeet setup instructions
+
+---
+
 ## [hotkey]
 
 Controls which key triggers push-to-talk recording.
@@ -140,6 +169,33 @@ bindsym --release $mod+v exec voxtype record stop
 **Note:** For `toggle` mode to work correctly, you must also set `state_file = "auto"` so voxtype can track its current state.
 
 See [User Manual - Compositor Keybindings](USER_MANUAL.md#compositor-keybindings) for complete setup instructions.
+
+### model_modifier
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+
+Optional modifier key that triggers the secondary model when held while pressing the hotkey. Requires `secondary_model` to be set in the `[whisper]` section.
+
+**Example:**
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+model_modifier = "LEFTSHIFT"  # Hold Shift + hotkey for secondary model
+
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+```
+
+**Valid key names:** Same modifier keys as `modifiers` option:
+- `LEFTSHIFT`, `RIGHTSHIFT`
+- `LEFTCTRL`, `RIGHTCTRL`
+- `LEFTALT`, `RIGHTALT`
+- `LEFTMETA`, `RIGHTMETA`
+
+**Note:** This only applies when using evdev hotkey detection (`enabled = true`). When using compositor keybindings, use `voxtype record start --model <model>` instead.
 
 ### cancel_key
 
@@ -522,6 +578,145 @@ voxtype --no-whisper-context-optimization daemon
 
 **Note:** This setting only applies when using the local whisper backend (`backend = "local"`). It has no effect with remote transcription.
 
+### initial_prompt
+
+**Type:** String
+**Default:** None (empty)
+**Required:** No
+
+Provides context to Whisper to improve transcription accuracy for domain-specific vocabulary. The prompt hints at terminology, proper nouns, or formatting conventions that Whisper should expect in the audio.
+
+**Why use it:**
+
+Whisper sometimes mistranscribes uncommon words, especially:
+- Technical jargon (Kubernetes, TypeScript, PostgreSQL)
+- Company or product names (Voxtype, Hyprland, Waybar)
+- People's names (especially non-English names)
+- Acronyms and abbreviations (API, CLI, LLM)
+- Domain-specific terms (medical, legal, scientific)
+
+By providing an initial prompt with these terms, Whisper is more likely to recognize and transcribe them correctly.
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+initial_prompt = "Technical discussion about Rust, TypeScript, and Kubernetes."
+```
+
+**More examples:**
+
+```toml
+# Software development context
+initial_prompt = "Voxtype, Hyprland, Waybar, Sway, wtype, ydotool, systemd, journalctl."
+
+# Medical dictation
+initial_prompt = "Medical notes. Terms: hypertension, myocardial infarction, CT scan, MRI."
+
+# Meeting with specific attendees
+initial_prompt = "Meeting with Zhang Wei, François Dupont, and Priya Sharma."
+```
+
+**CLI override:**
+```bash
+voxtype --initial-prompt "Discussion about Kubernetes and Terraform" daemon
+```
+
+**Tips:**
+- Keep prompts concise (a few words or a short sentence)
+- List specific terms you expect to appear in your dictation
+- Update the prompt when your context changes (different project, different domain)
+- The prompt doesn't need to be grammatically correct—a list of terms works well
+
+**Note:** This setting only applies when using the local whisper backend (`backend = "local"`). Remote servers may ignore the initial_prompt parameter.
+
+### secondary_model
+
+**Type:** String
+**Default:** None (disabled)
+**Required:** No
+
+A secondary Whisper model that can be triggered on-demand using the `model_modifier` hotkey or the `--model` CLI flag. Useful for having a fast model for everyday use and a more accurate model available when needed.
+
+**Example:**
+```toml
+[hotkey]
+model_modifier = "LEFTSHIFT"
+
+[whisper]
+model = "base.en"             # Fast model for everyday use
+secondary_model = "large-v3-turbo"  # Accurate model when needed
+```
+
+**Usage:**
+- Hold `model_modifier` while pressing the hotkey to use the secondary model
+- Or use CLI: `voxtype record start --model large-v3-turbo`
+
+### available_models
+
+**Type:** Array of strings
+**Default:** `[]`
+**Required:** No
+
+Additional models that can be requested via the `--model` CLI flag. The primary `model` and `secondary_model` are always available; this list adds more options.
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+available_models = ["medium.en", "small.en"]  # Additional models for CLI
+```
+
+**Usage:**
+```bash
+voxtype record start --model medium.en
+```
+
+**Note:** Models must be downloaded before use. Run `voxtype setup --download --model <name>` to download.
+
+### max_loaded_models
+
+**Type:** Integer
+**Default:** `2`
+**Required:** No
+
+Maximum number of models to keep loaded in memory simultaneously. When this limit is reached and a new model is requested, the least recently used non-primary model is evicted.
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+max_loaded_models = 3  # Keep up to 3 models in memory
+```
+
+**Notes:**
+- The primary model is never evicted
+- Only applies when `gpu_isolation = false` (subprocess mode doesn't cache models)
+- Higher values use more memory but reduce model loading latency
+
+### cold_model_timeout_secs
+
+**Type:** Integer
+**Default:** `300` (5 minutes)
+**Required:** No
+
+Time in seconds after which idle non-primary models are automatically evicted from memory. Set to `0` to disable auto-eviction.
+
+**Example:**
+```toml
+[whisper]
+model = "base.en"
+secondary_model = "large-v3-turbo"
+cold_model_timeout_secs = 60  # Evict unused models after 1 minute
+```
+
+**Notes:**
+- Only evicts models that haven't been used within the timeout period
+- The primary model is never evicted
+- Helps free memory when switching models infrequently
+
 ---
 
 ## Remote Backend Settings
@@ -613,6 +808,78 @@ remote_timeout_secs = 60  # 60 second timeout for long recordings
 
 ---
 
+## [parakeet]
+
+Configuration for the Parakeet speech-to-text engine. This section is only used when `engine = "parakeet"`.
+
+> **Note:** Parakeet support is experimental. See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
+
+### model
+
+**Type:** String
+**Default:** `"parakeet-tdt-0.6b-v3"`
+**Required:** No
+
+The Parakeet model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/`) or an absolute path to a model directory.
+
+**Example:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+```
+
+**Using absolute path:**
+```toml
+[parakeet]
+model = "/opt/models/parakeet-tdt-0.6b-v3"
+```
+
+### model_type
+
+**Type:** String
+**Default:** Auto-detected from model files
+**Required:** No
+
+The model architecture type. Usually auto-detected based on files present in the model directory.
+
+**Values:**
+- `tdt` - Token-Duration-Transducer (recommended, proper punctuation)
+- `ctc` - Connectionist Temporal Classification (faster, character-level)
+
+**Example:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+model_type = "tdt"
+```
+
+### on_demand_loading
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Same behavior as `[whisper].on_demand_loading`. When `true`, loads the model only when recording starts and unloads after transcription.
+
+**Example:**
+```toml
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+on_demand_loading = true  # Free memory when not transcribing
+```
+
+### Complete Example
+
+```toml
+engine = "parakeet"
+
+[parakeet]
+model = "parakeet-tdt-0.6b-v3"
+on_demand_loading = false  # Keep model loaded for fast response
+```
+
+---
+
 ## [output]
 
 Controls how transcribed text is delivered.
@@ -689,14 +956,58 @@ paste_keys = "shift+insert"  # For Hyprland/Omarchy
 
 When `true` and `mode = "type"`, falls back to clipboard if typing fails.
 
-**Note:** This setting has no effect when `mode = "paste"` since paste mode doesn't use fallback behavior.
+**Note:** This setting is ignored when `driver_order` is set, since the driver list explicitly defines what's tried.
 
 **Example:**
 ```toml
 [output]
 mode = "type"
-fallback_to_clipboard = true  # Use clipboard if ydotool fails
+fallback_to_clipboard = true  # Use clipboard if typing drivers fail
 ```
+
+### driver_order
+
+**Type:** Array of strings
+**Default:** `["wtype", "dotool", "ydotool", "clipboard", "xclip"]`
+**Required:** No
+
+Custom order of output drivers to try when `mode = "type"`. Each driver is tried in sequence until one succeeds. This allows you to prefer specific drivers or exclude others entirely.
+
+**Available drivers:**
+- `wtype` - Wayland virtual keyboard (best CJK/Unicode support, wlroots compositors only)
+- `dotool` - uinput-based typing (supports keyboard layouts, works on X11/Wayland/TTY)
+- `ydotool` - uinput-based typing (requires daemon, X11/Wayland/TTY)
+- `clipboard` - Wayland clipboard via wl-copy
+- `xclip` - X11 clipboard via xclip
+
+**Default behavior (no driver_order set):**
+The default chain is: wtype → dotool → ydotool → clipboard → xclip
+
+**Examples:**
+
+```toml
+[output]
+mode = "type"
+
+# Prefer ydotool over dotool, skip wtype
+driver_order = ["ydotool", "dotool", "clipboard"]
+
+# X11-only setup
+driver_order = ["dotool", "ydotool", "xclip"]
+
+# Force single driver (no fallback)
+driver_order = ["ydotool"]
+
+# KDE/GNOME Wayland (wtype doesn't work)
+driver_order = ["dotool", "ydotool", "clipboard"]
+```
+
+**CLI override:**
+```bash
+voxtype --driver=ydotool,clipboard daemon
+```
+
+**Note:** When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried.
 
 ### dotool_xkb_layout
 
@@ -864,6 +1175,32 @@ auto_submit = true  # Press Enter after transcription
 
 **Note:** This works with all output modes (`type`, `paste`) but has no effect in `clipboard` mode since clipboard-only output doesn't simulate keypresses.
 
+### shift_enter_newlines
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Convert newlines in transcribed text to Shift+Enter instead of regular Enter. This is useful for applications where pressing Enter submits the message or form, but you want to insert line breaks within your text.
+
+**Why use it:**
+
+Many chat and messaging applications (Slack, Discord, Teams, etc.) and some IDEs (Cursor AI chat) use Enter to submit/send and Shift+Enter to insert a line break. When dictating multi-line text, regular newlines would submit prematurely. This option ensures line breaks are inserted without triggering submission.
+
+**Example:**
+```toml
+[output]
+shift_enter_newlines = true  # Use Shift+Enter for newlines
+```
+
+**Common use cases:**
+- Slack, Discord, Microsoft Teams chat
+- AI coding assistants (Cursor, GitHub Copilot Chat)
+- Web forms where Enter submits
+- Any application where Enter has special meaning
+
+**Note:** This only affects the wtype output driver. When combined with `auto_submit = true`, the final Enter (to submit) is still sent as a regular Enter after all Shift+Enter line breaks.
+
 ### pre_output_command
 
 **Type:** String
@@ -1027,6 +1364,93 @@ curl -s http://localhost:1234/v1/chat/completions \
 ```
 
 Make it executable: `chmod +x ~/.config/voxtype/lm-studio-cleanup.sh`
+
+---
+
+## [profiles.*]
+
+Named profiles for context-specific settings. Profiles allow you to define different post-processing commands and output modes for different use cases, selectable at recording time via `--profile`.
+
+### Defining Profiles
+
+Each profile is a TOML table under `[profiles]`:
+
+```toml
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Format for Slack:'"
+
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as code comment:'"
+output_mode = "clipboard"
+
+[profiles.email]
+post_process_command = "ollama run llama3.2:1b 'Format as professional email:'"
+post_process_timeout_ms = 45000
+```
+
+### Profile Options
+
+#### post_process_command
+
+**Type:** String
+**Default:** None (uses `[output.post_process].command`)
+**Required:** No
+
+Shell command for post-processing. Overrides the default `[output.post_process].command` when this profile is active.
+
+#### post_process_timeout_ms
+
+**Type:** Integer
+**Default:** None (uses `[output.post_process].timeout_ms` or 30000)
+**Required:** No
+
+Timeout in milliseconds for the post-processing command.
+
+#### output_mode
+
+**Type:** String
+**Default:** None (uses `[output].mode`)
+**Required:** No
+
+Output mode override. Valid values: `type`, `clipboard`, `paste`.
+
+### Using Profiles
+
+Specify a profile when starting a recording:
+
+```bash
+voxtype record start --profile slack
+voxtype record toggle --profile code
+```
+
+### Behavior
+
+- Options not specified in a profile inherit from the main config
+- Unknown profile names log a warning and use default settings
+- Profiles have no effect on `record stop` or `record cancel`
+
+### Example
+
+```toml
+# Default post-processing
+[output.post_process]
+command = "ollama run llama3.2:1b 'Clean up:'"
+timeout_ms = 30000
+
+# Profile: casual chat
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Rewrite casually for Slack:'"
+
+# Profile: code comments, output to clipboard
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as code comment:'"
+output_mode = "clipboard"
+
+# Profile: meeting notes with longer timeout
+[profiles.notes]
+post_process_command = "ollama run llama3.2:1b 'Convert to bullet points:'"
+post_process_timeout_ms = 60000
+```
 
 ---
 
@@ -1528,6 +1952,43 @@ remote_timeout_secs = 30
 ```
 
 > **Note**: Cloud-based transcription sends your audio to third-party servers. See [User Manual - Remote Whisper Servers](USER_MANUAL.md#remote-whisper-servers) for privacy considerations.
+
+### Multi-Model Setup
+
+Use a fast model for everyday dictation with a more accurate model available on-demand:
+
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+model_modifier = "LEFTSHIFT"  # Hold Shift + hotkey for secondary model
+
+[whisper]
+model = "base.en"                    # Fast model, always ready
+secondary_model = "large-v3-turbo"   # Accurate model on-demand
+available_models = ["medium.en"]     # Additional models for CLI
+max_loaded_models = 2                # Keep 2 models in memory
+cold_model_timeout_secs = 300        # Evict unused models after 5 min
+
+[audio.feedback]
+enabled = true  # Helpful when switching models
+```
+
+**Usage:**
+- Normal hotkey press: Uses `base.en` (fast)
+- Hold Shift + hotkey: Uses `large-v3-turbo` (accurate)
+- CLI override: `voxtype record start --model medium.en`
+
+**Download models first:**
+```bash
+voxtype setup --download --model base.en
+voxtype setup --download --model large-v3-turbo
+voxtype setup --download --model medium.en
+```
+
+**Compatibility:** Multi-model works with all modes:
+- `on_demand_loading = true`: Models load in background during recording
+- `gpu_isolation = true`: Fresh subprocess per transcription with requested model
+- `backend = "remote"`: Model name passed to remote server
 
 ---
 

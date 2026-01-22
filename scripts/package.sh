@@ -358,6 +358,18 @@ if [[ "$TARGET_ARCH" == "x86_64" ]]; then
     echo ""
 fi
 
+# Run comprehensive validation (includes hash uniqueness for all binaries)
+if [[ "$VALIDATE" == "true" && -x "${SCRIPT_DIR}/validate-release.sh" ]]; then
+    echo "Running release validation..."
+    if ! "${SCRIPT_DIR}/validate-release.sh" "$VERSION"; then
+        echo ""
+        echo "Release validation FAILED!"
+        echo "Fix the issues above before packaging."
+        exit 1
+    fi
+    echo ""
+fi
+
 # Create staging directory using mktemp for portability
 # Note: We don't create /usr/bin here - the postinstall script creates the symlink
 STAGING="$(mktemp -d "${TMPDIR:-/tmp}/voxtype-package.XXXXXX")"

@@ -38,7 +38,7 @@ impl RemoteTranscriber {
             .as_ref()
             .ok_or_else(|| {
                 TranscribeError::ConfigError(
-                    "remote_endpoint is required when backend = 'remote'".into(),
+                    "remote_endpoint is required when mode = 'remote'".into(),
                 )
             })?
             .clone();
@@ -268,18 +268,9 @@ mod tests {
     #[test]
     fn test_encode_wav_basic() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
-            translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
+            mode: Some(crate::config::WhisperMode::Remote),
             remote_endpoint: Some("http://localhost:8080".to_string()),
-            remote_model: None,
-            remote_api_key: None,
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -302,18 +293,9 @@ mod tests {
     #[test]
     fn test_config_validation_missing_endpoint() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
-            translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
+            mode: Some(crate::config::WhisperMode::Remote),
             remote_endpoint: None, // Missing!
-            remote_model: None,
-            remote_api_key: None,
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let result = RemoteTranscriber::new(&config);
@@ -324,18 +306,9 @@ mod tests {
     #[test]
     fn test_config_validation_invalid_url() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
-            translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
+            mode: Some(crate::config::WhisperMode::Remote),
             remote_endpoint: Some("not-a-url".to_string()),
-            remote_model: None,
-            remote_api_key: None,
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let result = RemoteTranscriber::new(&config);
@@ -346,18 +319,10 @@ mod tests {
     #[test]
     fn test_multipart_body_structure() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
-            translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
+            mode: Some(crate::config::WhisperMode::Remote),
             remote_endpoint: Some("http://localhost:8080".to_string()),
             remote_model: Some("large-v3".to_string()),
-            remote_api_key: None,
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -383,18 +348,10 @@ mod tests {
     #[test]
     fn test_translate_false_uses_transcriptions_endpoint() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
+            mode: Some(crate::config::WhisperMode::Remote),
             translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
             remote_endpoint: Some("http://localhost:8080".to_string()),
-            remote_model: None,
-            remote_api_key: None,
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -414,18 +371,10 @@ mod tests {
     #[test]
     fn test_translate_true_uses_translations_endpoint() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("auto".to_string()),
+            mode: Some(crate::config::WhisperMode::Remote),
             translate: true,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
             remote_endpoint: Some("http://localhost:8080".to_string()),
-            remote_model: None,
-            remote_api_key: None,
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -445,18 +394,10 @@ mod tests {
     #[test]
     fn test_api_key_from_config() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
-            translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
+            mode: Some(crate::config::WhisperMode::Remote),
             remote_endpoint: Some("http://localhost:8080".to_string()),
-            remote_model: None,
             remote_api_key: Some("sk-test-key-123".to_string()),
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -466,18 +407,10 @@ mod tests {
     #[test]
     fn test_custom_timeout() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
-            translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
+            mode: Some(crate::config::WhisperMode::Remote),
             remote_endpoint: Some("http://localhost:8080".to_string()),
-            remote_model: None,
-            remote_api_key: None,
             remote_timeout_secs: Some(60),
+            ..Default::default()
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();
@@ -487,18 +420,9 @@ mod tests {
     #[test]
     fn test_default_timeout() {
         let config = WhisperConfig {
-            backend: crate::config::WhisperBackend::Remote,
-            model: "base.en".to_string(),
-            language: LanguageConfig::Single("en".to_string()),
-            translate: false,
-            threads: None,
-            on_demand_loading: false,
-            gpu_isolation: false,
-            context_window_optimization: true,
+            mode: Some(crate::config::WhisperMode::Remote),
             remote_endpoint: Some("http://localhost:8080".to_string()),
-            remote_model: None,
-            remote_api_key: None,
-            remote_timeout_secs: None,
+            ..Default::default()
         };
 
         let transcriber = RemoteTranscriber::new(&config).unwrap();

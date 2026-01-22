@@ -10,11 +10,22 @@ use std::process::Command;
 use tracing_subscriber::EnvFilter;
 use voxtype::{config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
 
+/// Parse a comma-separated list of driver names into OutputDriver vec
+fn parse_driver_order(s: &str) -> Result<Vec<config::OutputDriver>, String> {
+    s.split(',')
+        .map(|d| d.trim().parse::<config::OutputDriver>())
+        .collect()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Install SIGILL handler early to catch illegal instruction crashes
     // and provide a helpful error message instead of core dumping
     cpu::install_sigill_handler();
+
+    // Reset SIGPIPE to default behavior (terminate silently) to avoid panics
+    // when output is piped through commands like `head` that close the pipe early
+    reset_sigpipe();
 
     let cli = Cli::parse();
 
@@ -53,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Load configuration
+    let config_path = cli.config.clone().or_else(config::Config::default_path);
     let mut config = config::load_config(cli.config.as_deref())?;
 
     // Apply CLI overrides
@@ -83,6 +95,16 @@ async fn main() -> anyhow::Result<()> {
                 .spawn();
         }
     }
+    if let Some(engine) = cli.engine {
+        match engine.to_lowercase().as_str() {
+            "whisper" => config.engine = config::TranscriptionEngine::Whisper,
+            "parakeet" => config.engine = config::TranscriptionEngine::Parakeet,
+            _ => {
+                eprintln!("Error: Invalid engine '{}'. Valid options: whisper, parakeet", engine);
+                std::process::exit(1);
+            }
+        }
+    }
     if let Some(hotkey) = cli.hotkey {
         config.hotkey.key = hotkey;
     }
@@ -99,11 +121,25 @@ async fn main() -> anyhow::Result<()> {
     if cli.no_whisper_context_optimization {
         config.whisper.context_window_optimization = false;
     }
+    if let Some(prompt) = cli.initial_prompt {
+        config.whisper.initial_prompt = Some(prompt);
+    }
+    if let Some(ref driver_str) = cli.driver {
+        match parse_driver_order(driver_str) {
+            Ok(drivers) => {
+                config.output.driver_order = Some(drivers);
+            }
+            Err(e) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
 
     // Run the appropriate command
     match cli.command.unwrap_or(Commands::Daemon) {
         Commands::Daemon => {
-            let mut daemon = daemon::Daemon::new(config);
+            let mut daemon = daemon::Daemon::new(config, config_path);
             daemon.run().await?;
         }
 
@@ -175,6 +211,21 @@ async fn main() -> anyhow::Result<()> {
                         setup::waybar::print_config();
                     }
                 }
+                Some(SetupAction::Dms {
+                    install,
+                    uninstall,
+                    qml,
+                }) => {
+                    if install {
+                        setup::dms::install()?;
+                    } else if uninstall {
+                        setup::dms::uninstall()?;
+                    } else if qml {
+                        println!("{}", setup::dms::get_qml_config());
+                    } else {
+                        setup::dms::print_config();
+                    }
+                }
                 Some(SetupAction::Model { list, set, restart }) => {
                     if list {
                         setup::model::list_installed();
@@ -198,6 +249,18 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         // Default: show status
                         setup::gpu::show_status();
+                    }
+                }
+                Some(SetupAction::Parakeet { enable, disable, status }) => {
+                    if status {
+                        setup::parakeet::show_status();
+                    } else if enable {
+                        setup::parakeet::enable()?;
+                    } else if disable {
+                        setup::parakeet::disable()?;
+                    } else {
+                        // Default: show status
+                        setup::parakeet::show_status();
                     }
                 }
                 Some(SetupAction::Compositor { compositor_type }) => {
@@ -290,6 +353,38 @@ fn send_record_command(config: &config::Config, action: RecordAction) -> anyhow:
         };
         std::fs::write(&override_file, mode_str)
             .map_err(|e| anyhow::anyhow!("Failed to write output mode override: {}", e))?;
+    }
+
+    // Write model override file if specified
+    if let Some(model) = action.model_override() {
+        let override_file = config::Config::runtime_dir().join("model_override");
+        std::fs::write(&override_file, model)
+            .map_err(|e| anyhow::anyhow!("Failed to write model override: {}", e))?;
+    }
+
+    // Write profile override file if specified
+    if let Some(profile_name) = action.profile() {
+        // Validate that the profile exists in config
+        if config.get_profile(profile_name).is_none() {
+            let available = config.profile_names();
+            if available.is_empty() {
+                eprintln!("Error: Profile '{}' not found.", profile_name);
+                eprintln!();
+                eprintln!("No profiles are configured. Add profiles to your config.toml:");
+                eprintln!();
+                eprintln!("  [profiles.{}]", profile_name);
+                eprintln!("  post_process_command = \"your-command-here\"");
+            } else {
+                eprintln!("Error: Profile '{}' not found.", profile_name);
+                eprintln!();
+                eprintln!("Available profiles: {}", available.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "));
+            }
+            std::process::exit(1);
+        }
+
+        let profile_file = config::Config::runtime_dir().join("profile_override");
+        std::fs::write(&profile_file, profile_name)
+            .map_err(|e| anyhow::anyhow!("Failed to write profile override: {}", e))?;
     }
 
     // For toggle, we need to read current state to decide which signal to send
@@ -386,7 +481,7 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
     );
 
     // Create transcriber and transcribe
-    let transcriber = transcribe::create_transcriber(&config.whisper)?;
+    let transcriber = transcribe::create_transcriber(&config)?;
     let text = transcriber.transcribe(&final_samples)?;
 
     println!("\n{}", text);
@@ -667,6 +762,10 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("  theme = {:?}", config.audio.feedback.theme);
     println!("  volume = {}", config.audio.feedback.volume);
 
+    // Show current engine
+    println!("\n[engine]");
+    println!("  engine = {:?}", config.engine);
+
     println!("\n[whisper]");
     println!("  model = {:?}", config.whisper.model);
     println!("  language = {:?}", config.whisper.language);
@@ -675,12 +774,62 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
         println!("  threads = {}", threads);
     }
 
+    // Show Parakeet status (experimental)
+    println!("\n[parakeet] (EXPERIMENTAL)");
+    if let Some(ref parakeet_config) = config.parakeet {
+        println!("  model = {:?}", parakeet_config.model);
+        if let Some(ref model_type) = parakeet_config.model_type {
+            println!("  model_type = {:?}", model_type);
+        }
+        println!("  on_demand_loading = {}", parakeet_config.on_demand_loading);
+    } else {
+        println!("  (not configured)");
+    }
+
+    // Check for available Parakeet models
+    let models_dir = config::Config::models_dir();
+    let mut parakeet_models: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(&models_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("parakeet") {
+                    // Check if it has the required ONNX files
+                    let has_encoder = path.join("encoder-model.onnx").exists();
+                    let has_decoder = path.join("decoder_joint-model.onnx").exists()
+                        || path.join("model.onnx").exists();
+                    if has_encoder || has_decoder {
+                        parakeet_models.push(name);
+                    }
+                }
+            }
+        }
+    }
+    if parakeet_models.is_empty() {
+        println!("  available models: (none found)");
+    } else {
+        println!("  available models: {}", parakeet_models.join(", "));
+    }
+
     println!("\n[output]");
     println!("  mode = {:?}", config.output.mode);
     println!(
         "  fallback_to_clipboard = {}",
         config.output.fallback_to_clipboard
     );
+    if let Some(ref driver_order) = config.output.driver_order {
+        println!(
+            "  driver_order = [{}]",
+            driver_order
+                .iter()
+                .map(|d| format!("{:?}", d))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    } else {
+        println!("  driver_order = (default: wtype -> dotool -> ydotool -> clipboard)");
+    }
     println!("  type_delay_ms = {}", config.output.type_delay_ms);
     println!("  pre_type_delay_ms = {}", config.output.pre_type_delay_ms);
 
@@ -726,4 +875,19 @@ async fn show_config(config: &config::Config) -> anyhow::Result<()> {
     println!("Models dir: {:?}", config::Config::models_dir());
 
     Ok(())
+}
+
+/// Reset SIGPIPE to default behavior (terminate process) instead of the Rust
+/// default of ignoring it. This prevents panics when stdout is piped through
+/// commands like `head` that close the pipe early.
+#[cfg(unix)]
+fn reset_sigpipe() {
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+#[cfg(not(unix))]
+fn reset_sigpipe() {
+    // No-op on non-Unix platforms
 }

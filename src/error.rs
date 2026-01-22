@@ -52,6 +52,12 @@ pub enum AudioError {
     #[error("Audio device not found: '{0}'. List devices with: pactl list sources short")]
     DeviceNotFound(String),
 
+    #[error("Audio device not found: '{requested}'.\n{available}")]
+    DeviceNotFoundWithList {
+        requested: String,
+        available: String,
+    },
+
     #[error("Recording timeout: exceeded {0} seconds")]
     Timeout(u32),
 
@@ -105,13 +111,16 @@ pub enum OutputError {
     #[error("wl-copy not found in PATH. Install wl-clipboard via your package manager.")]
     WlCopyNotFound,
 
+    #[error("xclip not found in PATH. Install xclip via your package manager.")]
+    XclipNotFound,
+
     #[error("Text injection failed: {0}")]
     InjectionFailed(String),
 
     #[error("Ctrl+V simulation failed: {0}")]
     CtrlVFailed(String),
 
-    #[error("All output methods failed. Ensure wtype, dotool, ydotool, or wl-copy is available.")]
+    #[error("All output methods failed. Ensure wtype, dotool, ydotool, wl-copy, or xclip is available.")]
     AllMethodsFailed,
 }
 

@@ -11,10 +11,14 @@ Voxtype is a push-to-talk voice-to-text tool for Linux. Optimized for Wayland, w
 - [Hotkeys](#hotkeys)
 - [Compositor Keybindings](#compositor-keybindings)
 - [Canceling Transcription](#canceling-transcription)
+- [Transcription Engines](#transcription-engines)
+- [Multi-Model Support](#multi-model-support)
+- [Improving Transcription Accuracy](#improving-transcription-accuracy)
 - [Whisper Models](#whisper-models)
 - [Remote Whisper Servers](#remote-whisper-servers)
 - [Output Modes](#output-modes)
 - [Post-Processing with LLMs](#post-processing-with-llms)
+- [Profiles](#profiles)
 - [Tips & Best Practices](#tips--best-practices)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Integration Examples](#integration-examples)
@@ -162,6 +166,19 @@ voxtype setup gpu --enable   # Switch to Vulkan GPU backend (requires sudo)
 voxtype setup gpu --disable  # Switch back to CPU backend (requires sudo)
 ```
 
+### `voxtype setup dms`
+
+Install a status widget for DankMaterialShell (KDE Plasma alternative shell).
+
+```bash
+voxtype setup dms              # Show setup instructions
+voxtype setup dms --install    # Install the QML widget plugin
+voxtype setup dms --uninstall  # Remove the widget
+voxtype setup dms --qml        # Output raw QML content
+```
+
+See [With DankMaterialShell](#with-dankmaterialshell-kde-plasma) for details.
+
 ### `voxtype record`
 
 Control recording from external sources (compositor keybindings, scripts).
@@ -173,6 +190,22 @@ voxtype record start --file         # Write to file_path from config
 voxtype record stop                 # Stop recording and transcribe (sends SIGUSR2 to daemon)
 voxtype record toggle               # Toggle recording state
 voxtype record cancel               # Cancel recording or transcription in progress
+```
+
+**Model override:** Use `--model` to specify which model to use for this recording:
+
+```bash
+voxtype record start --model large-v3-turbo  # Use a specific model
+voxtype record stop                          # Transcribes with the model specified at start
+```
+
+The model must be configured as `model`, `secondary_model`, or listed in `available_models` in your config. See [Multi-Model Configuration](CONFIGURATION.md#secondary_model) for setup.
+
+**Output mode override:** Use `--type`, `--clipboard`, or `--paste` to override the output mode:
+
+```bash
+voxtype record start --clipboard  # Output to clipboard instead of typing
+voxtype record toggle --paste     # Use paste mode for this recording
 ```
 
 **File output:** The `--file` flag writes transcription to a file instead of typing or using clipboard. Use `--file=path.txt` for a specific file, or `--file` alone to use `file_path` from config. By default, the file is overwritten on each transcription. To append instead, set `file_mode = "append"` in your config file:
@@ -487,6 +520,179 @@ Any valid evdev key name works. Common choices:
 
 ---
 
+## Transcription Engines
+
+Voxtype supports two speech-to-text engines:
+
+| Engine | Best For | GPU Required | Languages |
+|--------|----------|--------------|-----------|
+| **Whisper** (default) | Most users, multilingual | Optional (faster with GPU) | 99+ languages |
+| **Parakeet** (experimental) | Fast CPU inference, English | Optional (CUDA available) | English only |
+
+### Selecting an Engine
+
+**Via config file** (`~/.config/voxtype/config.toml`):
+
+```toml
+# Default - use Whisper
+engine = "whisper"
+
+# Or use Parakeet (requires Parakeet-enabled binary)
+engine = "parakeet"
+```
+
+**Via CLI flag** (overrides config):
+
+```bash
+voxtype --engine whisper daemon
+voxtype --engine parakeet daemon
+```
+
+### Whisper (Default)
+
+Whisper is OpenAI's speech recognition model, running locally via whisper.cpp. It offers:
+
+- Excellent accuracy across many languages
+- Multiple model sizes (tiny to large)
+- GPU acceleration via Vulkan (AMD/Intel) or CUDA (NVIDIA)
+- Active community and frequent updates
+
+This is the recommended engine for most users.
+
+### Parakeet (Experimental)
+
+Parakeet is NVIDIA's FastConformer-based ASR model. It offers:
+
+- Very fast CPU inference (30x realtime on AVX-512)
+- Good accuracy for English dictation
+- Proper punctuation and capitalization
+- No GPU required (though CUDA acceleration available)
+
+**Requirements:**
+- A Parakeet-enabled binary (`voxtype-*-parakeet-*`)
+- The Parakeet model downloaded (~600MB)
+- English-only use case
+
+See [PARAKEET.md](PARAKEET.md) for detailed setup instructions.
+
+---
+
+## Multi-Model Support
+
+Voxtype can manage multiple Whisper models, letting you switch between them on the fly. Use a fast model for everyday dictation and a more accurate model when precision matters.
+
+### Configuration
+
+```toml
+[hotkey]
+model_modifier = "LEFTSHIFT"  # Hold Shift + hotkey for secondary model
+
+[whisper]
+model = "base.en"                    # Primary model (fast, always loaded)
+secondary_model = "large-v3-turbo"   # Secondary model (accurate, on-demand)
+available_models = ["medium.en"]     # Additional models for CLI access
+max_loaded_models = 2                # Keep up to 2 models in memory
+cold_model_timeout_secs = 300        # Evict unused models after 5 minutes
+```
+
+### Using Multiple Models
+
+**With hotkey modifier** (evdev mode):
+- Normal hotkey press → uses primary model (`base.en`)
+- Hold Shift + hotkey → uses secondary model (`large-v3-turbo`)
+
+**With CLI** (compositor keybindings):
+```bash
+# Use primary model
+voxtype record start
+
+# Use secondary model
+voxtype record start --model large-v3-turbo
+
+# Use any available model
+voxtype record start --model medium.en
+```
+
+### Memory Management
+
+Voxtype caches loaded models to avoid reload delays:
+
+- `max_loaded_models`: Maximum models to keep in memory (default: 2)
+- `cold_model_timeout_secs`: Auto-evict unused models after this time (default: 300s)
+- Primary model is never evicted
+- Models load in the background while you speak
+
+### Example: Speed vs Accuracy
+
+```toml
+[hotkey]
+key = "SCROLLLOCK"
+model_modifier = "LEFTSHIFT"
+
+[whisper]
+model = "tiny.en"                   # Lightning fast for quick notes
+secondary_model = "large-v3-turbo"  # High accuracy when needed
+
+[audio.feedback]
+enabled = true  # Helpful audio cues when switching models
+```
+
+---
+
+## Improving Transcription Accuracy
+
+Whisper sometimes mistranscribes uncommon words—technical terms, proper nouns, company names, or domain-specific jargon. The `initial_prompt` feature lets you provide hints that improve accuracy for these cases.
+
+### When to Use initial_prompt
+
+Use initial_prompt when you regularly dictate content containing:
+
+- **Technical jargon**: Kubernetes, PostgreSQL, TypeScript, systemd
+- **Product/company names**: Voxtype, Hyprland, Waybar, wtype
+- **People's names**: Especially non-English names that Whisper might mishear
+- **Acronyms**: API, CLI, LLM, CI/CD
+- **Domain-specific terms**: Medical, legal, or scientific vocabulary
+
+### Configuration
+
+Add to your `~/.config/voxtype/config.toml`:
+
+```toml
+[whisper]
+model = "base.en"
+initial_prompt = "Technical discussion about Rust, TypeScript, and Kubernetes."
+```
+
+The prompt doesn't need to be a complete sentence. A list of expected terms works well:
+
+```toml
+# Software development
+initial_prompt = "Voxtype, Hyprland, Waybar, Sway, wtype, ydotool, systemd."
+
+# Medical dictation
+initial_prompt = "Medical notes: hypertension, myocardial infarction, CT scan, MRI."
+
+# Meeting context
+initial_prompt = "Meeting with Zhang Wei, François Dupont, and Priya Sharma."
+```
+
+### CLI Override
+
+Override the prompt for a single session:
+
+```bash
+voxtype --initial-prompt "Discussion about Terraform and AWS Lambda" daemon
+```
+
+### Tips
+
+- Keep prompts short—a sentence or list of terms is sufficient
+- Update the prompt when your context changes (different project, client, or domain)
+- Combine with a larger model (`small.en` or `medium.en`) for best results on difficult vocabulary
+- The prompt guides Whisper's expectations but doesn't guarantee exact transcription
+
+---
+
 ## Whisper Models
 
 ### Model Comparison
@@ -705,12 +911,12 @@ systemctl --user enable --now ydotool
 
 wtype does not work on all Wayland compositors. KDE Plasma and GNOME do not support the virtual keyboard protocol that wtype requires.
 
-| Desktop | wtype | dotool | ydotool | Notes |
-|---------|-------|--------|---------|-------|
-| Hyprland, Sway, River | ✓ | ✓ | ✓ | wtype recommended (best CJK support) |
-| KDE Plasma (Wayland) | ✗ | ✓ | ✓ | dotool recommended (keyboard layout support) |
-| GNOME (Wayland) | ✗ | ✓ | ✓ | dotool recommended (keyboard layout support) |
-| X11 (any) | ✗ | ✓ | ✓ | dotool or ydotool (daemon required for ydotool) |
+| Desktop | wtype | dotool | ydotool | clipboard | Notes |
+|---------|-------|--------|---------|-----------|-------|
+| Hyprland, Sway, River | ✓ | ✓ | ✓ | wl-copy | wtype recommended (best CJK support) |
+| KDE Plasma (Wayland) | ✗ | ✓ | ✓ | wl-copy | dotool recommended (keyboard layout support) |
+| GNOME (Wayland) | ✗ | ✓ | ✓ | wl-copy | dotool recommended (keyboard layout support) |
+| X11 (any) | ✗ | ✓ | ✓ | xclip | dotool or ydotool; xclip for clipboard |
 
 **KDE Plasma and GNOME users:** Install dotool (recommended) or set up ydotool for type mode to work.
 
@@ -784,7 +990,7 @@ mode = "paste"
 
 ### Fallback Behavior
 
-Voxtype uses a fallback chain: wtype → dotool → ydotool → clipboard
+Voxtype uses a fallback chain: wtype → dotool → ydotool → clipboard (wl-copy) → xclip
 
 ```toml
 [output]
@@ -792,7 +998,74 @@ mode = "type"
 fallback_to_clipboard = true  # Falls back to clipboard if typing fails
 ```
 
-On Wayland, wtype is tried first (best CJK support), then dotool (supports keyboard layouts), then ydotool, then clipboard. On X11 or KDE/GNOME Wayland where wtype doesn't work, dotool or ydotool is used, falling back to clipboard if unavailable.
+On Wayland, wtype is tried first (best CJK support), then dotool (supports keyboard layouts), then ydotool, then wl-copy (Wayland clipboard). On X11, xclip is available as an additional clipboard fallback.
+
+### Custom Driver Order
+
+You can customize the fallback order or limit which drivers are used:
+
+```toml
+[output]
+mode = "type"
+# Prefer ydotool over wtype, skip dotool entirely
+driver_order = ["ydotool", "wtype", "clipboard"]
+```
+
+**Available drivers:** `wtype`, `dotool`, `ydotool`, `clipboard` (wl-copy), `xclip` (X11)
+
+**Examples:**
+
+```toml
+# X11-only setup (no Wayland)
+driver_order = ["ydotool", "xclip"]
+
+# Force ydotool only (no fallback)
+driver_order = ["ydotool"]
+
+# KDE/GNOME Wayland (wtype doesn't work)
+driver_order = ["dotool", "ydotool", "clipboard"]
+```
+
+**CLI override:**
+
+```bash
+# Override driver order for this session
+voxtype --driver=ydotool,clipboard daemon
+```
+
+When `driver_order` is set, `fallback_to_clipboard` is ignored—the driver list explicitly defines what's tried and in what order.
+
+### Typing Options
+
+Additional options for controlling how text is typed:
+
+**Auto-submit (send Enter after typing):**
+
+```toml
+[output]
+auto_submit = true  # Press Enter after transcription
+```
+
+Useful for chat applications or command lines where you want to submit immediately after dictating.
+
+**Shift+Enter for newlines:**
+
+```toml
+[output]
+shift_enter_newlines = true  # Use Shift+Enter instead of Enter for line breaks
+```
+
+Many chat apps (Slack, Discord, Teams) and AI assistants (Cursor) use Enter to send and Shift+Enter for line breaks. Enable this when dictating multi-line messages to prevent premature submission.
+
+**Combining both options:**
+
+```toml
+[output]
+shift_enter_newlines = true  # Line breaks as Shift+Enter
+auto_submit = true           # Final Enter to submit
+```
+
+This lets you dictate multi-line messages that are automatically submitted when complete.
 
 ---
 
@@ -989,6 +1262,103 @@ You'll see log messages like:
 
 ---
 
+## Profiles
+
+Profiles let you define named configurations for different contexts, each with its own post-processing command and output mode. Instead of changing your config file when switching between tasks, use profiles to switch behavior on the fly.
+
+### When to Use Profiles
+
+Profiles are useful when you need different post-processing for different contexts:
+
+- **Slack/Teams**: Casual tone, emoji-friendly formatting
+- **Code comments**: Technical terminology, specific formatting
+- **Email**: Professional tone, proper salutations
+- **Notes**: Bullet points, timestamps
+
+### Defining Profiles
+
+Add profile sections to your `~/.config/voxtype/config.toml`:
+
+```toml
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Format this for Slack. Keep it casual and concise:'"
+
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as a code comment. Be technical and precise:'"
+output_mode = "clipboard"  # Override output mode for this profile
+
+[profiles.email]
+post_process_command = "ollama run llama3.2:1b 'Format as professional email text:'"
+post_process_timeout_ms = 45000  # Allow more time for longer responses
+```
+
+### Using Profiles
+
+Specify a profile when starting a recording:
+
+```bash
+# Use the slack profile for this recording
+voxtype record start --profile slack
+voxtype record stop
+
+# Or with toggle mode
+voxtype record toggle --profile code
+```
+
+**With compositor keybindings (Hyprland example):**
+
+```hyprlang
+# Different keybindings for different profiles
+bind = SUPER, V, exec, voxtype record start
+bindr = SUPER, V, exec, voxtype record stop
+
+bind = SUPER SHIFT, V, exec, voxtype record start --profile slack
+bindr = SUPER SHIFT, V, exec, voxtype record stop
+
+bind = SUPER CTRL, V, exec, voxtype record start --profile code
+bindr = SUPER CTRL, V, exec, voxtype record stop
+```
+
+### Profile Options
+
+Each profile can override these settings:
+
+| Option | Description |
+|--------|-------------|
+| `post_process_command` | Shell command for text processing (overrides `[output.post_process].command`) |
+| `post_process_timeout_ms` | Timeout in milliseconds (overrides `[output.post_process].timeout_ms`) |
+| `output_mode` | Output mode: `type`, `clipboard`, or `paste` (overrides `[output].mode`) |
+
+### Profile Behavior
+
+- If a profile doesn't specify an option, the default from your config is used
+- Unknown profile names log a warning and fall back to default behavior
+- Profiles work with all recording modes (evdev hotkey, compositor keybindings)
+
+### Example: Context-Aware Dictation
+
+```toml
+# Default post-processing for general use
+[output.post_process]
+command = "ollama run llama3.2:1b 'Clean up grammar and punctuation:'"
+timeout_ms = 30000
+
+# Slack: casual, concise
+[profiles.slack]
+post_process_command = "ollama run llama3.2:1b 'Rewrite for Slack. Casual tone, keep it brief:'"
+
+# Code: technical, clipboard output (for pasting into IDE)
+[profiles.code]
+post_process_command = "ollama run llama3.2:1b 'Format as a code comment in the style of the surrounding code:'"
+output_mode = "clipboard"
+
+# Meeting notes: bullet points
+[profiles.notes]
+post_process_command = "ollama run llama3.2:1b 'Convert to bullet points. Be concise:'"
+```
+
+---
+
 ## Tips & Best Practices
 
 ### For Best Transcription Quality
@@ -1161,6 +1531,47 @@ exec = voxtype status --format text
 interval = 1
 format = <label>
 label = %output%
+```
+
+### With DankMaterialShell (KDE Plasma)
+
+Voxtype includes a QML plugin for [DankMaterialShell](https://github.com/nicman23/dankMaterialShell), an alternative KDE Plasma shell. The widget displays voxtype status with animated icons and supports click-to-toggle recording.
+
+**Automatic installation:**
+
+```bash
+voxtype setup dms --install
+```
+
+This creates a VoxtypeWidget plugin in `~/.config/DankMaterialShell/plugins/`.
+
+**After installation:**
+1. Open DankMaterialShell settings
+2. Navigate to the Plugins section
+3. Enable the VoxtypeWidget plugin
+4. Add the Voxtype widget to your panel
+
+**Widget features:**
+- Polls status every 500ms
+- Uses Nerd Font icons with color-coded states:
+  - Green microphone: idle (ready)
+  - Red pulsing dot: recording
+  - Yellow spinner: transcribing
+  - Gray microphone-slash: stopped/not running
+- Click to toggle recording
+- Hover for status tooltip
+
+**Requirements:**
+- DankMaterialShell installed
+- A [Nerd Font](https://www.nerdfonts.com/) for icons
+- `state_file = "auto"` in voxtype config (the default)
+
+**Other commands:**
+
+```bash
+voxtype setup dms              # Show setup instructions
+voxtype setup dms --uninstall  # Remove the widget
+voxtype setup dms --qml        # Output raw QML (for scripting)
 ```
 
 ---
