@@ -69,7 +69,6 @@ whisper-rs = "0.15.1"
 # Parakeet speech-to-text (optional, ONNX-based)
 parakeet-rs = { version = "0.2.9", optional = true }
 
-
 # CPU count for thread detection
 num_cpus = "1.16"
 
@@ -98,6 +97,7 @@ clap = { version = "4", features = ["derive"] }
 clap_mangen = "0.2"
 
 [dev-dependencies]
+dirs = "5.0"
 
 [profile.release]
 lto = true

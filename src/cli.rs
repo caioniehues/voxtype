@@ -106,6 +106,22 @@ pub struct Cli {
     #[arg(long, value_name = "DRIVERS")]
     pub driver: Option<String>,
 
+    /// Enable Voice Activity Detection (filter silence before transcription)
+    #[arg(long)]
+    pub vad: bool,
+
+    /// VAD speech detection threshold (0.0-1.0, default: 0.5)
+    /// Lower = more sensitive, Higher = less sensitive
+    #[arg(long, value_name = "THRESHOLD")]
+    pub vad_threshold: Option<f32>,
+
+    /// VAD backend: auto, energy, whisper (default: auto)
+    /// - auto: Whisper VAD for Whisper engine, Energy for Parakeet
+    /// - energy: Fast RMS-based detection, no model download needed
+    /// - whisper: Silero VAD via whisper-rs, more accurate, needs model
+    #[arg(long, value_name = "BACKEND")]
+    pub vad_backend: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -451,6 +467,13 @@ pub enum SetupAction {
     Compositor {
         #[command(subcommand)]
         compositor_type: CompositorType,
+    },
+
+    /// Download the Silero VAD model for speech detection
+    Vad {
+        /// Show VAD model status
+        #[arg(long)]
+        status: bool,
     },
 }
 

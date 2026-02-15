@@ -8,7 +8,7 @@ use clap::Parser;
 use std::path::PathBuf;
 use std::process::Command;
 use tracing_subscriber::EnvFilter;
-use voxtype::{config, cpu, daemon, setup, transcribe, Cli, Commands, RecordAction, SetupAction};
+use voxtype::{config, cpu, daemon, setup, transcribe, vad, Cli, Commands, RecordAction, SetupAction};
 
 /// Parse a comma-separated list of driver names into OutputDriver vec
 fn parse_driver_order(s: &str) -> Result<Vec<config::OutputDriver>, String> {
@@ -167,6 +167,26 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+    if cli.vad {
+        config.vad.enabled = true;
+    }
+    if let Some(threshold) = cli.vad_threshold {
+        config.vad.threshold = threshold.clamp(0.0, 1.0);
+    }
+    if let Some(ref backend) = cli.vad_backend {
+        config.vad.backend = match backend.to_lowercase().as_str() {
+            "auto" => config::VadBackend::Auto,
+            "energy" => config::VadBackend::Energy,
+            "whisper" => config::VadBackend::Whisper,
+            _ => {
+                eprintln!(
+                    "Unknown VAD backend '{}'. Valid options: auto, energy, whisper",
+                    backend
+                );
+                std::process::exit(1);
+            }
+        };
+    }
 
     // Run the appropriate command
     match cli.command.unwrap_or(Commands::Daemon) {
@@ -308,6 +328,14 @@ async fn main() -> anyhow::Result<()> {
                 Some(SetupAction::Compositor { compositor_type }) => {
                     warn_if_root("compositor");
                     setup::compositor::run(&compositor_type).await?;
+                }
+                Some(SetupAction::Vad { status }) => {
+                    warn_if_root("vad");
+                    if status {
+                        setup::vad::show_status();
+                    } else {
+                        setup::vad::download_model()?;
+                    }
                 }
                 None => {
                     // Default: run setup (non-blocking)
@@ -531,8 +559,29 @@ fn transcribe_file(config: &config::Config, path: &PathBuf) -> anyhow::Result<()
         final_samples.len() as f32 / 16000.0
     );
 
+    // Run VAD if enabled
+    if let Ok(Some(vad)) = vad::create_vad(config) {
+        match vad.detect(&final_samples) {
+            Ok(result) => {
+                println!(
+                    "VAD: {:.2}s speech ({:.1}% of audio)",
+                    result.speech_duration_secs,
+                    result.speech_ratio * 100.0
+                );
+                if !result.has_speech {
+                    println!("No speech detected, skipping transcription.");
+                    return Ok(());
+                }
+            }
+            Err(e) => {
+                eprintln!("VAD warning: {}", e);
+                // Continue with transcription if VAD fails
+            }
+        }
+    }
+
     // Create transcriber and transcribe
-    let transcriber = transcribe::create_transcriber(&config)?;
+    let transcriber = transcribe::create_transcriber(config)?;
     let text = transcriber.transcribe(&final_samples)?;
 
     println!("\n{}", text);
