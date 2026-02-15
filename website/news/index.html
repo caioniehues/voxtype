@@ -9,16 +9,16 @@
     <!-- Open Graph / Social Media -->
     <meta property="og:type" content="website">
     <meta property="og:url" content="https://voxtype.io/news/">
-    <meta property="og:title" content="Voxtype 0.5.5: Native GNOME/KDE Support, Media Keys">
-    <meta property="og:description" content="Native text input for GNOME and KDE Wayland via libei protocol, plus media keys and numeric keycodes for hotkey configuration.">
+    <meta property="og:title" content="Voxtype 0.5.6: Voice Activity Detection, Eager Transcription, Recording Timeout Fix">
+    <meta property="og:description" content="Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency. Recording timeouts now transcribe instead of discarding audio.">
     <meta property="og:image" content="https://voxtype.io/images/gpu-isolation.png">
     <meta property="og:image:width" content="1200">
     <meta property="og:image:height" content="630">
 
     <!-- Twitter Card -->
     <meta name="twitter:card" content="summary_large_image">
-    <meta name="twitter:title" content="Voxtype 0.5.5: Native GNOME/KDE Support, Media Keys">
-    <meta name="twitter:description" content="Native text input for GNOME and KDE Wayland via libei protocol, plus media keys and numeric keycodes for hotkey configuration.">
+    <meta name="twitter:title" content="Voxtype 0.5.6: Voice Activity Detection, Eager Transcription, Recording Timeout Fix">
+    <meta name="twitter:description" content="Voice activity detection filters silence and prevents hallucinations. Eager input processing reduces perceived latency. Recording timeouts now transcribe instead of discarding audio.">
     <meta name="twitter:image" content="https://voxtype.io/images/gpu-isolation.png">
 
     <title>News & Updates | Voxtype</title>
@@ -76,6 +76,69 @@
         <div class="container">
 
             <!-- v0.5.x Era Posts -->
+
+            <article class="news-article" id="v056">
+                <div class="article-meta">
+                    <time datetime="2026-02-15">February 15, 2026</time>
+                    <span class="article-tag">Release</span>
+                </div>
+                <h2>v0.5.6: Voice Activity Detection, Eager Transcription, Recording Timeout Fix</h2>
+                <div class="article-body">
+                    <p>Voxtype 0.5.6 adds voice activity detection to filter silence before transcription, starts transcribing while you're still recording, and fixes several regressions from the 0.5.x series.</p>
+
+                    <h3>Voice Activity Detection (VAD)</h3>
+                    <p>Whisper has a well-known problem: feed it silence, and it hallucinates. You'll get phantom words, repeated phrases, or garbage text from a recording that was mostly dead air. VAD solves this by detecting speech in your audio and stripping out silence before it reaches the transcription engine.</p>
+
+                    <p><strong>Why use it:</strong> If you sometimes press your hotkey and pause before speaking, or record in a noisy environment where Whisper picks up phantom words, VAD will clean that up. It also speeds up transcription by sending less audio to process.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[vad]
+enabled = true
+backend = "silero"   # or "energy", "webrtc"
+threshold = 0.5      # 0.0 to 1.0, higher = stricter</code></pre>
+                    </div>
+
+                    <p>Three backends are available. Silero is a neural network model that gives the best accuracy. Energy is a simple volume threshold that works without any dependencies. WebRTC uses Google's VAD library for a middle ground between the two.</p>
+
+                    <p>Run <code>voxtype setup vad</code> to download the Silero model and configure VAD interactively.</p>
+
+                    <h3>Eager Input Processing</h3>
+                    <p>Voxtype can now start transcribing audio while you're still recording. Instead of waiting until you release the hotkey, it processes audio in chunks as you speak. When you stop recording, there's less audio left to transcribe, so the result appears faster.</p>
+
+                    <p><strong>Why use it:</strong> For longer dictations, this noticeably reduces the delay between releasing the hotkey and seeing text. The transcription engine gets a head start instead of waiting for the full recording.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[whisper]
+eager_processing = true
+eager_interval_secs = 3   # Process every 3 seconds</code></pre>
+                    </div>
+
+                    <h3>Recording Timeout Now Transcribes</h3>
+                    <p>Previously, when a recording hit <code>max_duration_secs</code>, the audio was silently discarded. Now it gets transcribed. If you forget to release your hotkey or intentionally record a long passage, the audio is processed instead of lost.</p>
+
+                    <p><strong>Why use it:</strong> You no longer lose audio when a recording times out. The default max duration is 30 seconds, and that audio now always produces output.</p>
+
+                    <h3>Append Text After Transcription</h3>
+                    <p>A new <code>append_text</code> option lets you add text after every transcription. The most common use is appending a trailing space so the cursor is ready for the next word.</p>
+
+                    <div class="code-block">
+                        <div class="code-header"><span>config.toml</span></div>
+                        <pre><code>[output]
+append_text = " "   # Trailing space after each transcription</code></pre>
+                    </div>
+
+                    <h3>Bug Fixes</h3>
+                    <ul>
+                        <li>Fix GPU isolation subprocess not working (regression since v0.5.0)</li>
+                        <li>Fix state file default path not being set correctly</li>
+                        <li>RPM packages now include <code>pipewire-alsa</code> dependency and use a wrapper script instead of a symlink for the binary, fixing installation on Fedora</li>
+                        <li>Bump parakeet-rs for NixOS compatibility</li>
+                        <li>Add KDE Plasma hotkey setup documentation</li>
+                    </ul>
+                </div>
+            </article>
 
             <article class="news-article" id="v055">
                 <div class="article-meta">
